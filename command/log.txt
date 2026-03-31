@@ -1,0 +1,68 @@
+================================================================================
+LOG FILE: Slab Opname PPIC - AI Revision History
+================================================================================
+This file tracks all AI-made revisions and database changes.
+Format: [TIMESTAMP] - ACTION: Description
+================================================================================
+
+================================================================================
+SESSION: 2026-03-27 14:00 - 20:00
+================================================================================
+[2026-03-27 14:30] - CREATED: AGENTS.md - Consolidated project documentation with workflows, memories, and procedures
+[2026-03-27 15:00] - ACTION: Set up GitHub MCP using official GitHub MCP server (https://api.githubcopilot.com/mcp/)
+[2026-03-27 15:30] - CREATED: command/enhancement.txt - Comprehensive code analysis with security issues and enhancement recommendations
+[2026-03-27 16:00] - UPDATED: supabaseClient.ts - Changed from hardcoded credentials to environment variables
+[2026-03-27 16:30] - ACTION: Removed AI-related files (ANALYSIS.md, APP_SCHEME.md, TASK_LOG.md)
+[2026-03-27 17:00] - PUSHED: Initial project files to GitHub (package.json, vite.config.ts, tsconfig.json, etc.)
+[2026-03-27 18:00] - PUSHED: Additional components (Navigation.tsx, LockBanner.tsx, Dashboard.tsx)
+[2026-03-27 19:00] - PUSHED: README.md with enhanced documentation and mermaid diagrams
+[2026-03-27 20:00] - UPDATED: AGENTS.md with comprehensive workflow and memories
+
+================================================================================
+SESSION NOTES:
+- GitHub MCP configured successfully using Bearer token authentication
+- Repository: daniswaramp/grp-slab-opname (public)
+- All core project files pushed to GitHub
+- README enhanced with System Architecture, Real-time Data Flow, and User Authentication Flow diagrams
+- Enhancement report created documenting critical security issues and future improvements
+
+================================================================================
+SESSION: 2026-03-28 (Current)
+================================================================================
+[2026-03-28 10:00] - UPDATED: README.md - Enhanced with more detailed features, badges, and setup instructions
+[2026-03-28 10:30] - PUSHED: Enhanced README.md to GitHub with comprehensive documentation
+[2026-03-28 11:00] - UPDATED: AGENTS.md - Added comprehensive workflow, SQL change procedures, and session memories
+[2026-03-28 12:00] - PUSHED: All remaining components to GitHub (App.tsx, OpnameSlab.tsx, OpnameList.tsx, Setting.tsx, Database.tsx, DatabaseSetup.tsx, BackupList.tsx, BackupModal.tsx)
+[2026-03-28 13:00] - CREATED: command/commercial_plan.md - Commercial distribution plan for selling the app
+[2026-04-01 12:00] - CREATED: netlify.toml - Netlify deployment configuration with SPA redirects
+[2026-04-01 12:05] - CREATED: .env - Supabase credentials for production deployment
+[2026-04-01 12:05] - UPDATED: .env.example - Template file for environment variables
+[2026-04-01 13:00] - PUSHED: netlify.toml to GitHub
+
+================================================================================
+SESSION: 2026-04-01 - RLS POLICY FIX
+================================================================================
+[2026-04-01] DIAGNOSED: App showing empty data due to missing RLS policies
+[2026-04-01] FIXED: Added RLS policies for all tables (sap_stock, mother_slab_stock, cut_slab_stock, opname_records, locations, users_online)
+[2026-04-01] MIGRATION: add_missing_rls_policies applied to Supabase project mqwpgqvyzrjfsitvrmgh
+[2026-04-01] PUSHED: command/03.D.Add_Missing_RLS_Policies.sql to GitHub
+
+================================================================================
+PENDING ITEMS:
+- Commercial distribution implementation (see command/commercial_plan.md)
+- Deploy to Netlify (config files ready)
+
+================================================================================
+USER REQUESTS:
+- Create .zip of repo for manual upload (User wanted to upload directly to GitHub themselves)
+- Enhance GitHub description with diagrams (Completed via README.md)
+
+================================================================================
+DATABASE CHANGES (SQL Files):
+--------------------------------------------------------------------------------
+| File | Description | Status |
+|------|-------------|--------|
+| 01.D.Add_Lock_Columns.sql | Added locked_at, locked_by columns | Applied |
+| 02.D.Update_Lock_RLS_Policies.sql | RLS policies for lock columns | Applied |
+| 03.D.Add_Missing_RLS_Policies.sql | RLS policies for all tables | Applied |
+================================================================================
