@@ -10,8 +10,15 @@ export const StockTables = {
 
 const BUCKET_NAME = 'Slab_Opname';
 
+// --- Global Cache for Opname Records ---
 let recordsCache: OpnameRecord[] | null = null;
+const CACHE_LIMIT = 10000; // Safety limit if needed, but we rely on fetching all
 
+/**
+ * Fetches ALL opname records from the database using pagination.
+ * Stores result in memory cache to avoid repeated large fetches.
+ * @param forceReload If true, ignores cache and re-fetches from DB.
+ */
 export const fetchAllOpnameRecords = async (forceReload = false) => {
   if (recordsCache && !forceReload) {
     return recordsCache;
@@ -46,8 +53,12 @@ export const fetchAllOpnameRecords = async (forceReload = false) => {
   return allRecords;
 };
 
+/**
+ * Updates the local cache based on Realtime payload events (INSERT, UPDATE, DELETE).
+ * Call this from subscription callbacks to keep cache fresh without re-fetching all.
+ */
 export const updateOpnameCacheFromPayload = (eventType: string, oldRecord: any, newRecord: any) => {
-  if (!recordsCache) return;
+  if (!recordsCache) return; // If no cache, next fetch will get everything
 
   if (eventType === 'INSERT' && newRecord) {
     recordsCache = [newRecord, ...recordsCache];
@@ -57,6 +68,7 @@ export const updateOpnameCacheFromPayload = (eventType: string, oldRecord: any, 
     recordsCache = recordsCache.filter(r => r.id !== oldRecord.id);
   }
 };
+
 
 export const fetchLatestStock = async (table: string, limit = 10) => {
   const { data, error } = await supabase
@@ -76,18 +88,36 @@ export const getCount = async (table: string) => {
   return count || 0;
 };
 
+export const getStockCounts = async () => {
+  const [sap, mother, cut] = await Promise.all([
+    getCount(StockTables.SAP),
+    getCount(StockTables.MOTHER),
+    getCount(StockTables.CUT)
+  ]);
+  return { sap, mother, cut };
+};
+
 export const getUnopnamedCounts = async () => {
+  // 1. Get total counts from stock tables
   const [sapTotal, motherTotal, cutTotal] = await Promise.all([
     getCount(StockTables.SAP),
     getCount(StockTables.MOTHER),
     getCount(StockTables.CUT)
   ]);
 
+  // 2. Get opname records for detailed calculation
+  // CHANGED: Use fetchAllOpnameRecords to ensure we calculate against ALL data
   const opnameRecords = await fetchAllOpnameRecords();
 
+  // Helper to calculate stats per category
   const calculateStats = (total: number, sourceKey: 'grade_sap' | 'grade_mother' | 'grade_cut') => {
+    // Only count if the field has a value (not null/empty/-)
     const matchedRecords = opnameRecords?.filter((r: any) => r[sourceKey] && r[sourceKey] !== '' && r[sourceKey] !== '-') || [];
+
+    // Unique Opnamed Count
     const uniqueOpnamed = new Set(matchedRecords.map((r: any) => r.batch_id)).size;
+
+    // Unique Breakdown by Status (within matched records)
     const uniqueSync = new Set(matchedRecords.filter((r: any) => r.status === 'Synchronized').map((r: any) => r.batch_id)).size;
     const uniqueMissing = new Set(matchedRecords.filter((r: any) => r.status === 'Missing Data').map((r: any) => r.batch_id)).size;
 
@@ -113,7 +143,7 @@ export const getSystemNotification = async () => {
     .select('notification_text')
     .eq('id', 1)
     .single();
-  if (error && error.code !== 'PGRST116') throw error;
+  if (error && error.code !== 'PGRST116') throw error; // Ignore no rows error (default handles it)
   return data?.notification_text || '';
 };
 
@@ -148,12 +178,12 @@ export const searchSlab = async (code: string) => {
 };
 
 export const uploadEvidenceImage = async (file: File, filename: string) => {
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
   const path = `images/${dateStr}/${filename}`;
 
   const { data, error } = await supabase.storage.from(BUCKET_NAME).upload(path, file, {
     upsert: true,
-    contentType: 'image/jpeg'
+    contentType: 'image/jpeg' // or auto-detect
   });
 
   if (error) throw error;
@@ -181,11 +211,26 @@ export const saveOpnameRecord = async (record: OpnameRecord) => {
   
   if (error) throw error;
 
+  // Manually update cache if needed, but usually the subscription will catch it.
+  // However, syncOpnameListToStorage needs latest data.
+  // We should update cache immediately to ensure sync uses it.
+  // Note: 'data' from insert might be null if 'select' wasn't chained, but usually it returns inserted row if .select() is added.
+  // The current code doesn't do .select() on insert.
+
+  // To keep it simple: syncOpnameListToStorage will re-fetch EVERYTHING.
+  // Optimization: We can just let it fetch cache.
+  // Ideally, the subscription in UI handles the cache update.
+  // For backend consistency, we might want to force reload for the sync, OR trust the subscription propagation.
+  // Given user wants "no lag", relying on cache is better.
+  // But wait, saveOpnameRecord doesn't return the full object with ID unless we select().
+
   await syncOpnameListToStorage();
   return data;
 };
 
 export const syncOpnameListToStorage = async () => {
+  // CHANGED: Use fetchAllOpnameRecords(true) to ensure we have the very latest state before writing CSV
+  // Force reload here to be safe for the CSV file integrity
   const records = await fetchAllOpnameRecords(true);
 
   if (!records || records.length === 0) return;
@@ -200,6 +245,7 @@ export const syncOpnameListToStorage = async () => {
   ];
 
   const rows = records.map((r: any) => {
+    // Logic for match columns derivation
     const dimMatch = (!r.database_t && !r.database_w && !r.database_l) ? 'NO REFERENCE' : (r.dimension_match ? 'YES' : 'NO');
     const gradeMatch = (!r.grade_sap && !r.grade_mother && !r.grade_cut) ? 'NO REFERENCE' : (r.grade_match ? 'YES' : 'NO');
 
@@ -225,6 +271,14 @@ export const syncOpnameListToStorage = async () => {
   });
 };
 
+export const deleteOpnameRecord = async (id: string) => {
+  const { error } = await supabase
+    .from('opname_records')
+    .delete()
+    .eq('id', id);
+  if (error) throw error;
+};
+
 export const getBackups = async () => {
     const { data, error } = await supabase.from('opname_backups').select('id, created_at, name').order('created_at', { ascending: false });
     if (error) throw error;
@@ -232,6 +286,7 @@ export const getBackups = async () => {
 };
 
 export const saveBackup = async (name: string) => {
+    // CHANGED: Use fetchAllOpnameRecords(true) to ensure backup is complete
     const records = await fetchAllOpnameRecords(true);
 
     const { error: saveError } = await supabase.from('opname_backups').insert([{
@@ -247,11 +302,14 @@ export const loadBackup = async (backupId: string) => {
 
     if (!backup || !backup.data) throw new Error("Backup not found or empty");
 
+    // Clear all existing records
     const { error: deleteError } = await supabase.from('opname_records').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     if (deleteError) throw deleteError;
 
+    // Restore from backup
     const recordsToInsert = (backup.data as any[]).map(r => r);
 
+    // CHANGED: Use chunked insert for restoration to avoid payload limits
     if (recordsToInsert.length > 0) {
         const CHUNK_SIZE = 1000;
         for (let i = 0; i < recordsToInsert.length; i += CHUNK_SIZE) {
@@ -261,6 +319,7 @@ export const loadBackup = async (backupId: string) => {
         }
     }
 
+    // Force refresh cache after restore
     await fetchAllOpnameRecords(true);
     await syncOpnameListToStorage();
 };
@@ -286,6 +345,7 @@ export const uploadStockCSV = async (type: 'sap' | 'mother' | 'cut', records: Sl
   
   await supabase.from(table).delete().neq('batch_id', '___FORCE_CLEAR___');
   
+  // CHANGED: Chunked insert for stock upload as well to be safe
   const CHUNK_SIZE = 1000;
   const dbRecords = records.map(r => ({
     batch_id: r.batch_id,
