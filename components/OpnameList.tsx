@@ -1,8 +1,8 @@
-
-import React, { useState, useEffect } from 'react';
-import { fetchAllOpnameRecords, deleteOpnameRecord, getStockCounts } from '../services/dataService';
-import { OpnameRecord, UserRole } from '../types';
-import { Search, Trash2, Download, Eye, X, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { supabase } from '../supabaseClient';
+import { OpnameRecord, UserRole, OpnameBackup } from '../types';
+import { getBackups, saveBackup, loadBackup, fetchAllOpnameRecords, updateOpnameCacheFromPayload } from '../services/dataService';
+import { Download, Trash2, Filter, FileSpreadsheet, Save, RotateCcw, Upload, ChevronDown, Database, Link, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface Props {
   role: UserRole;
@@ -13,158 +13,489 @@ interface Props {
 const OpnameList: React.FC<Props> = ({ role, userName, isLocked = false }) => {
   const [records, setRecords] = useState<OpnameRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [filterLocation, setFilterLocation] = useState<string>('all');
-  const [selectedRecord, setSelectedRecord] = useState<OpnameRecord | null>(null);
+  const [showBackupMenu, setShowBackupMenu] = useState(false);
+  const [backups, setBackups] = useState<OpnameBackup[]>([]);
+  const [showLoadModal, setShowLoadModal] = useState(false);
+
   const [currentPage, setCurrentPage] = useState(1);
-  const [stockCounts, setStockCounts] = useState({ sap: 0, mother: 0, cut: 0 });
-  const recordsPerPage = 500;
+  const [itemsPerPage, setItemsPerPage] = useState(100);
+
+  const [filters, setFilters] = useState({
+    startDate: '',
+    endDate: '',
+    inspector: '',
+    batchId: '',
+    location: '',
+    status: '',
+    verification: ''
+  });
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    loadRecords();
-    loadStockCounts();
+    fetchRecords();
+    const sub = supabase
+      .channel('records-list')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'opname_records' }, (payload) => {
+        updateOpnameCacheFromPayload(payload.eventType, payload.old, payload.new);
+
+        setRecords(prev => {
+          let updated = [...prev];
+          if (payload.eventType === 'INSERT') {
+            updated = [payload.new as OpnameRecord, ...updated];
+          } else if (payload.eventType === 'UPDATE') {
+            updated = updated.map(r => r.id === payload.new.id ? payload.new as OpnameRecord : r);
+          } else if (payload.eventType === 'DELETE') {
+            updated = updated.filter(r => r.id !== payload.old.id);
+          }
+          return updated.sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime());
+        });
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(sub); };
   }, []);
 
-  const loadRecords = async (forceRefresh = false) => {
+  const fetchRecords = async () => {
     setLoading(true);
-    const data = await fetchAllOpnameRecords(forceRefresh);
-    setRecords(data || []);
-    setLoading(false);
-  };
-
-  const loadStockCounts = async () => {
-    const counts = await getStockCounts();
-    setStockCounts(counts);
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this record?')) return;
     try {
-      await deleteOpnameRecord(id);
-      await loadRecords(true);
+        const data = await fetchAllOpnameRecords();
+        setRecords(data || []);
     } catch (e) {
-      alert('Error deleting record');
+        console.error("Failed to fetch records", e);
+    } finally {
+        setLoading(false);
     }
   };
 
-  const exportToCSV = () => {
-    const headers = ['Batch ID', 'Grade', 'Location', 'Status', 'Dimension Match', 'Grade Match', 'Remarks', 'User', 'Time'];
-    const rows = filteredRecords.map(r => [
-      r.batch_id, r.grade || '', r.location || '', r.status || '',
-      r.dimension_match ? 'Yes' : 'No', r.grade_match ? 'Yes' : 'No',
-      r.remarks || '', r.user_name || '', r.time || ''
-    ]);
-    const csv = [headers.join(','), ...rows.map(row => row.map(cell => `"${cell}"`).join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `opname_records_${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
+  const fetchBackups = async () => {
+    try {
+        const data = await getBackups();
+        setBackups(data as any[]);
+    } catch (e) {
+        console.error(e);
+    }
   };
 
+  const handleDelete = async (id: string) => {
+    if (confirm('Are you sure you want to delete this record?')) {
+      await supabase.from('opname_records').delete().eq('id', id);
+    }
+  };
+
+  const handleBackupAction = async (action: 'save' | 'load' | 'upload' | 'download') => {
+    setShowBackupMenu(false);
+    if (action === 'save') {
+        const name = prompt("Enter backup name (e.g. Shift 1 Complete):", `Backup ${new Date().toLocaleString()}`);
+        if (name) {
+            try {
+                await saveBackup(name);
+                alert("Backup saved successfully!");
+            } catch (e: any) {
+                alert("Error saving backup: " + e.message);
+            }
+        }
+    } else if (action === 'load') {
+        await fetchBackups();
+        setShowLoadModal(true);
+    } else if (action === 'download') {
+        const jsonContent = JSON.stringify(records, null, 2);
+        const blob = new Blob([jsonContent], { type: 'application/json' });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `opname_backup_${new Date().toISOString()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    } else if (action === 'upload') {
+        fileInputRef.current?.click();
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+        try {
+            const content = evt.target?.result as string;
+            let data: OpnameRecord[] = [];
+            const isCsv = file.name.toLowerCase().endsWith('.csv');
+
+            if (isCsv) {
+                const lines = content.split('\n').map(l => l.trim()).filter(l => l);
+                data = lines.slice(1).map(line => {
+                    const cols = line.split(',').map(c => c.trim());
+                    const num = (v: string) => (v && v !== '-' ? Number(v) : undefined);
+                    const str = (v: string) => (v && v !== '-' ? v : '');
+
+                    const date = str(cols[0]);
+                    const user_name = str(cols[1]);
+                    const time = str(cols[2]);
+                    const batch_id = str(cols[3]);
+                    const grade_sap = str(cols[4]);
+                    const grade_mother = str(cols[5]);
+                    const grade_cut = str(cols[6]);
+                    const database_t = num(cols[7]);
+                    const database_w = num(cols[8]);
+                    const database_l = num(cols[9]);
+                    const location = str(cols[10]);
+                    const gang_baris = str(cols[11]);
+                    const status = str(cols[12]) as any;
+                    const dimMatchStr = str(cols[13]);
+                    const dimension_match = dimMatchStr === 'YES';
+                    const actual_thick = num(cols[14]);
+                    const actual_width = num(cols[15]);
+                    const actual_length = num(cols[16]);
+                    const gradeMatchStr = str(cols[17]);
+                    const grade_match = gradeMatchStr === 'YES';
+                    const actual_grade = str(cols[18]);
+                    const remarks = str(cols[19]);
+                    const image_url = str(cols[20]);
+                    const grade = actual_grade || grade_sap || grade_mother || grade_cut || 'N/A';
+
+                    return {
+                        user_name, batch_id, grade, location, status, dimension_match, grade_match,
+                        batch_match: true, remarks, time, date, grade_sap, grade_mother, grade_cut,
+                        database_t, database_w, database_l, actual_thick, actual_width, actual_length,
+                        actual_grade, actual_batch_id: batch_id, gang_baris, image_url
+                    } as OpnameRecord;
+                });
+            } else {
+                data = JSON.parse(content);
+                if (!Array.isArray(data)) throw new Error("Invalid backup format");
+            }
+
+            const name = file.name.replace(/\.(json|csv)$/i, '') + ' (Uploaded)';
+            const { error } = await supabase.from('opname_backups').insert([{ name, data }]);
+            if (error) throw error;
+            alert("Backup uploaded successfully! You can now Load it.");
+        } catch (err: any) {
+            console.error(err);
+            alert("Error uploading backup: " + err.message);
+        }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleRestore = async (id: string) => {
+    if (confirm("WARNING: This will OVERWRITE current active data with the selected backup. Continue?")) {
+        try {
+            await loadBackup(id);
+            alert("Data loaded successfully!");
+            setShowLoadModal(false);
+            fetchRecords();
+        } catch (e: any) {
+            alert("Error loading data: " + e.message);
+        }
+    }
+  };
+
+  const exportCSV = () => {
+    if (records.length === 0) return;
+    const headers = [
+        'Date', 'User', 'Time', 'Batch ID',
+        'Grade SAP', 'Grade Mother', 'Grade Cut',
+        'Database Thick', 'Database Width', 'Database Length',
+        'Location', 'Gang/Baris', 'Status',
+        'Dimensi Match dengan Data', 'Actual Thick', 'Actual Width', 'Actual Length',
+        'Grade Match dengan Data', 'Actual Grade', 'Remarks',
+        'Evidence'
+    ];
+
+    const rows = records.map(r => {
+        const dimMatch = (!r.database_t && !r.database_w && !r.database_l) ? 'NO REFERENCE' : (r.dimension_match ? 'YES' : 'NO');
+        const gradeMatch = (!r.grade_sap && !r.grade_mother && !r.grade_cut) ? 'NO REFERENCE' : (r.grade_match ? 'YES' : 'NO');
+
+        return [
+            r.date, r.user_name, r.time, r.batch_id,
+            r.grade_sap || '-', r.grade_mother || '-', r.grade_cut || '-',
+            r.database_t || '-', r.database_w || '-', r.database_l || '-',
+            r.location, r.gang_baris || '-', r.status,
+            dimMatch,
+            r.actual_thick || '-', r.actual_width || '-', r.actual_length || '-',
+            gradeMatch,
+            r.actual_grade || '-',
+            (r.remarks || '').replace(/,/g, ' '),
+            r.image_url || '-'
+        ];
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `opname_list_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const uniqueInspectors = Array.from(new Set(records.map(r => r.user_name))).sort();
+  const uniqueStatus = Array.from(new Set(records.map(r => r.status))).sort();
+
   const filteredRecords = records.filter(r => {
-    const matchesSearch = !searchTerm || (r.batch_id || '').toLowerCase().includes(searchTerm.toLowerCase()) || (r.user_name || '').toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesStatus = filterStatus === 'all' || r.status === filterStatus;
-    const matchesLocation = filterLocation === 'all' || r.location === filterLocation;
-    return matchesSearch && matchesStatus && matchesLocation;
+    if (filters.startDate && r.date && r.date < filters.startDate) return false;
+    if (filters.endDate && r.date && r.date > filters.endDate) return false;
+    if (filters.inspector && r.user_name !== filters.inspector) return false;
+    if (filters.status && r.status !== filters.status) return false;
+    if (filters.batchId && !r.batch_id.toLowerCase().includes(filters.batchId.toLowerCase())) return false;
+    if (filters.location && !r.location.toLowerCase().includes(filters.location.toLowerCase())) return false;
+    if (filters.verification) {
+        const dimMatch = (!r.database_t && !r.database_w && !r.database_l) ? 'NO REFERENCE' : (r.dimension_match ? 'YES' : 'NO');
+        const gradeMatch = (!r.grade_sap && !r.grade_mother && !r.grade_cut) ? 'NO REFERENCE' : (r.grade_match ? 'YES' : 'NO');
+        if (dimMatch !== filters.verification && gradeMatch !== filters.verification) return false;
+    }
+    return true;
   });
 
-  const totalPages = Math.ceil(filteredRecords.length / recordsPerPage);
-  const paginatedRecords = filteredRecords.slice((currentPage - 1) * recordsPerPage, currentPage * recordsPerPage);
-  const uniqueLocations = Array.from(new Set(records.map(r => r.location).filter(Boolean)));
+  const totalPages = Math.ceil(filteredRecords.length / itemsPerPage);
+  const indexOfLastItem = currentPage * itemsPerPage;
+  const indexOfFirstItem = indexOfLastItem - itemsPerPage;
+  const currentItems = filteredRecords.slice(indexOfFirstItem, indexOfLastItem);
+
+  const goToPage = (page: number) => {
+    if (page >= 1 && page <= totalPages) {
+        setCurrentPage(page);
+    }
+  };
 
   return (
-    <div className="space-y-6 animate-fadeIn">
-      <div className="bg-white p-4 md:p-8 rounded-2xl border border-gray-100 shadow-sm">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2"><Download className="text-blue-600" size={24} /> Opname Records</h2>
-          <div className="flex gap-2">
-            <button onClick={() => loadRecords(true)} disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"><Download size={14} /> Refresh</button>
-            {role === UserRole.ADMIN && <button onClick={exportToCSV} className="px-4 py-2 bg-green-600 text-white rounded-lg text-xs font-bold hover:bg-green-700 flex items-center gap-2"><Download size={14} /> Export CSV</button>}
-          </div>
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden animate-fadeIn pb-10">
+      <div className="p-6 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-gray-800">Opname Reconciliation History</h2>
+          <p className="text-sm text-gray-400">View and manage all reconciled slab records</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} /><input type="text" placeholder="Search Batch ID or User..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm" /></div>
-          <select value={filterStatus} onChange={(e) => { setFilterStatus(e.target.value); setCurrentPage(1); }} className="px-4 py-2 border border-gray-200 rounded-lg text-sm">
-            <option value="all">All Status</option>
-            <option value="Synchronized">Synchronized</option>
-            <option value="Missing Data">Missing Data</option>
-            <option value="Not Available">Not Available</option>
-          </select>
-          <select value={filterLocation} onChange={(e) => { setFilterLocation(e.target.value); setCurrentPage(1); }} className="px-4 py-2 border border-gray-200 rounded-lg text-sm">
-            <option value="all">All Locations</option>
-            {uniqueLocations.map(loc => <option key={loc} value={loc!}>{loc}</option>)}
-          </select>
-        </div>
-
-        <div className="overflow-x-auto border border-gray-100 rounded-xl">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-gray-50 text-gray-600 font-bold uppercase">
-              <tr>
-                <th className="px-4 py-3">Batch ID</th>
-                <th className="px-4 py-3">Grade</th>
-                <th className="px-4 py-3">Location</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">User</th>
-                <th className="px-4 py-3">Time</th>
-                {role === UserRole.ADMIN && !isLocked && <th className="px-4 py-3 text-center">Action</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (<tr><td colSpan={7} className="px-4 py-8 text-center"><Loader2 className="animate-spin mx-auto text-blue-600" size={24} /></td></tr>) : paginatedRecords.length === 0 ? (<tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400 italic">No records found</td></tr>) : paginatedRecords.map((r, idx) => (
-                <tr key={idx} className="hover:bg-gray-50 group">
-                  <td className="px-4 py-3 font-bold text-gray-900">{r.batch_id}</td>
-                  <td className="px-4 py-3">{r.grade || '-'}</td>
-                  <td className="px-4 py-3">{r.location || '-'}</td>
-                  <td className="px-4 py-3"><span className={`px-2 py-1 rounded-full text-[10px] font-bold ${r.status === 'Synchronized' ? 'bg-green-100 text-green-700' : r.status === 'Missing Data' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>{r.status || '-'}</span></td>
-                  <td className="px-4 py-3 text-gray-500">{r.user_name}</td>
-                  <td className="px-4 py-3 text-gray-500">{r.time || '-'}</td>
-                  {role === UserRole.ADMIN && !isLocked && (
-                    <td className="px-4 py-3 text-center">
-                      <button onClick={() => setSelectedRecord(r)} className="text-blue-600 hover:text-blue-800 p-1"><Eye size={16} /></button>
-                      <button onClick={() => handleDelete(r.id!)} className="text-red-400 hover:text-red-600 p-1"><Trash2 size={16} /></button>
-                    </td>
+        <div className="flex gap-2">
+            {role === UserRole.ADMIN && !isLocked && (
+              <div className="relative">
+                  <button
+                      onClick={() => setShowBackupMenu(!showBackupMenu)}
+                      className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2.5 rounded-lg font-bold flex items-center gap-2 transition-all"
+                  >
+                      <Database size={18} /> BACKUP / LOAD <ChevronDown size={14}/>
+                  </button>
+                  {showBackupMenu && (
+                      <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden z-20">
+                          <button onClick={() => handleBackupAction('load')} className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"><RotateCcw size={14}/> Load Backup</button>
+                          <button onClick={() => handleBackupAction('save')} className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"><Save size={14}/> Update & Save</button>
+                          <button onClick={() => handleBackupAction('upload')} className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"><Upload size={14}/> Upload CSV / JSON</button>
+                          <button onClick={() => handleBackupAction('download')} className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 text-sm font-medium"><Download size={14}/> Download JSON</button>
+                      </div>
                   )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".json,.csv" />
+              </div>
+            )}
 
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
-            <p className="text-xs text-gray-500">Page {currentPage} of {totalPages} ({filteredRecords.length} records)</p>
-            <div className="flex gap-2">
-              <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 bg-gray-100 rounded text-xs disabled:opacity-50"><ChevronLeft size={14} /></button>
-              <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1 bg-gray-100 rounded text-xs disabled:opacity-50"><ChevronRight size={14} /></button>
-            </div>
-          </div>
-        )}
+            <button
+            onClick={exportCSV}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold flex items-center gap-2 transition-all shadow-md active:scale-95"
+            >
+            <FileSpreadsheet size={18} /> EXPORT CSV
+            </button>
+        </div>
       </div>
 
-      {selectedRecord && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 animate-slideUp">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-black text-gray-800">Record Details</h3>
-              <button onClick={() => setSelectedRecord(null)} className="hover:bg-gray-100 rounded-full p-1"><X size={20} /></button>
-            </div>
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Batch ID:</span><span className="font-bold">{selectedRecord.batch_id}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Grade:</span><span>{selectedRecord.grade || '-'}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Location:</span><span>{selectedRecord.location || '-'}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Status:</span><span>{selectedRecord.status || '-'}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Dimension Match:</span><span>{selectedRecord.dimension_match ? 'Yes' : 'No'}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Grade Match:</span><span>{selectedRecord.grade_match ? 'Yes' : 'No'}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">User:</span><span>{selectedRecord.user_name}</span></div>
-              <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Time:</span><span>{selectedRecord.time || '-'}</span></div>
-              {selectedRecord.remarks && <div className="grid grid-cols-2 gap-2"><span className="text-gray-500">Remarks:</span><span>{selectedRecord.remarks}</span></div>}
-            </div>
-          </div>
-        </div>
+      <div className="bg-gray-50 p-4 border-b border-gray-100 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">From Date</span>
+             <input type="date" className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, startDate: e.target.value}); setCurrentPage(1);}} />
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">To Date</span>
+             <input type="date" className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, endDate: e.target.value}); setCurrentPage(1);}} />
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">Inspector</span>
+             <select className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, inspector: e.target.value}); setCurrentPage(1);}}>
+                 <option value="">All</option>
+                 {uniqueInspectors.map(u => <option key={u} value={u}>{u}</option>)}
+             </select>
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">Batch ID</span>
+             <input type="text" placeholder="Search..." className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, batchId: e.target.value}); setCurrentPage(1);}} />
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">Location</span>
+             <input type="text" placeholder="Search..." className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, location: e.target.value}); setCurrentPage(1);}} />
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">Status</span>
+             <select className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, status: e.target.value}); setCurrentPage(1);}}>
+                 <option value="">All</option>
+                 {uniqueStatus.map(s => <option key={s} value={s}>{s}</option>)}
+             </select>
+         </div>
+         <div className="flex flex-col">
+             <span className="text-[10px] font-bold text-gray-400 uppercase">Verification</span>
+             <select className="border rounded-lg px-2 py-1 text-xs" onChange={e => {setFilters({...filters, verification: e.target.value}); setCurrentPage(1);}}>
+                 <option value="">All</option>
+                 <option value="YES">YES</option>
+                 <option value="NO">NO</option>
+                 <option value="NO REFERENCE">NO REFERENCE</option>
+             </select>
+         </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs whitespace-nowrap">
+          <thead className="bg-gray-100 text-gray-500 uppercase font-bold tracking-wider">
+            <tr>
+              <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3">User</th>
+              <th className="px-4 py-3">Time</th>
+              <th className="px-4 py-3">Batch ID</th>
+              <th className="px-4 py-3 bg-blue-50 text-blue-800">Grade SAP</th>
+              <th className="px-4 py-3 bg-purple-50 text-purple-800">Grade Mother</th>
+              <th className="px-4 py-3 bg-orange-50 text-orange-800">Grade Cut</th>
+              <th className="px-4 py-3">Database Thick</th>
+              <th className="px-4 py-3">Database Width</th>
+              <th className="px-4 py-3">Database Length</th>
+              <th className="px-4 py-3">Location</th>
+              <th className="px-4 py-3">Gang/Baris</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Dim Match</th>
+              <th className="px-4 py-3 bg-red-50 text-red-800">Act. Thick</th>
+              <th className="px-4 py-3 bg-red-50 text-red-800">Act. Width</th>
+              <th className="px-4 py-3 bg-red-50 text-red-800">Act. Length</th>
+              <th className="px-4 py-3">Grd Match</th>
+              <th className="px-4 py-3 bg-red-50 text-red-800">Act. Grade</th>
+              <th className="px-4 py-3">Remarks</th>
+              <th className="px-4 py-3">Evidence</th>
+              <th className="px-4 py-3 text-center">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {currentItems.map((r) => {
+                const dimMatch = (!r.database_t && !r.database_w && !r.database_l) ? 'NO REFERENCE' : (r.dimension_match ? 'YES' : 'NO');
+                const gradeMatch = (!r.grade_sap && !r.grade_mother && !r.grade_cut) ? 'NO REFERENCE' : (r.grade_match ? 'YES' : 'NO');
+
+                return (
+                  <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 font-medium">{r.date}</td>
+                    <td className="px-4 py-3">{r.user_name}</td>
+                    <td className="px-4 py-3 text-gray-500">{r.time}</td>
+                    <td className="px-4 py-3 font-bold text-blue-600">{r.batch_id}</td>
+
+                    <td className="px-4 py-3 bg-blue-50/30 text-xs">{r.grade_sap || '-'}</td>
+                    <td className="px-4 py-3 bg-purple-50/30 text-xs">{r.grade_mother || '-'}</td>
+                    <td className="px-4 py-3 bg-orange-50/30 text-xs">{r.grade_cut || '-'}</td>
+
+                    <td className="px-4 py-3">{r.database_t || '-'}</td>
+                    <td className="px-4 py-3">{r.database_w || '-'}</td>
+                    <td className="px-4 py-3">{r.database_l || '-'}</td>
+
+                    <td className="px-4 py-3 font-bold">{r.location}</td>
+                    <td className="px-4 py-3">{r.gang_baris || '-'}</td>
+
+                    <td className="px-4 py-3">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                            r.status === 'Synchronized' ? 'bg-green-100 text-green-700' :
+                            r.status === 'Missing Data' ? 'bg-yellow-100 text-yellow-700' :
+                            'bg-red-100 text-red-700'
+                        }`}>{r.status}</span>
+                    </td>
+
+                    <td className="px-4 py-3 font-bold text-[10px]">{dimMatch}</td>
+
+                    <td className="px-4 py-3 bg-red-50/30 font-bold">{r.actual_thick || '-'}</td>
+                    <td className="px-4 py-3 bg-red-50/30 font-bold">{r.actual_width || '-'}</td>
+                    <td className="px-4 py-3 bg-red-50/30 font-bold">{r.actual_length || '-'}</td>
+
+                    <td className="px-4 py-3 font-bold text-[10px]">{gradeMatch}</td>
+                    <td className="px-4 py-3 bg-red-50/30 font-bold">{r.actual_grade || '-'}</td>
+
+                    <td className="px-4 py-3 max-w-[200px] truncate" title={r.remarks}>{r.remarks || '-'}</td>
+
+                    <td className="px-4 py-3">
+                        {r.image_url ? (
+                            <a href={r.image_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
+                                <Link size={14}/> View
+                            </a>
+                        ) : '-'}
+                    </td>
+
+                    <td className="px-4 py-3 text-center">
+                      {(role === UserRole.ADMIN || r.user_name === userName) && !isLocked && (
+                        <button
+                          onClick={() => handleDelete(r.id!)}
+                          className="text-gray-400 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+            })}
+            {loading && <tr><td colSpan={22} className="p-10 text-center text-gray-400">Loading records...</td></tr>}
+            {!loading && filteredRecords.length === 0 && <tr><td colSpan={22} className="p-10 text-center text-gray-400">No records found matching filters.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {!loading && filteredRecords.length > 0 && (
+         <div className="flex flex-col md:flex-row items-center justify-between p-4 border-t border-gray-100 bg-gray-50 gap-4">
+             <div className="flex items-center gap-2 text-xs font-bold text-gray-500">
+                 <span>Rows per page:</span>
+                 <select
+                   value={itemsPerPage}
+                   onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                   className="border rounded px-2 py-1 bg-white"
+                 >
+                     <option value={20}>20</option>
+                     <option value={50}>50</option>
+                     <option value={100}>100</option>
+                     <option value={200}>200</option>
+                     <option value={500}>500</option>
+                 </select>
+                 <span className="ml-2">Showing {indexOfFirstItem + 1} - {Math.min(indexOfLastItem, filteredRecords.length)} of {filteredRecords.length} records</span>
+             </div>
+
+             <div className="flex items-center gap-2">
+                 <button
+                    onClick={() => goToPage(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="p-2 rounded hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                 >
+                     <ChevronLeft size={16}/>
+                 </button>
+                 <span className="text-xs font-bold text-gray-700">Page {currentPage} of {totalPages}</span>
+                 <button
+                    onClick={() => goToPage(currentPage + 1)}
+                    disabled={currentPage === totalPages}
+                    className="p-2 rounded hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                 >
+                     <ChevronRight size={16}/>
+                 </button>
+             </div>
+         </div>
+      )}
+
+      {showLoadModal && (
+         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-slideUp">
+                 <div className="p-4 border-b flex justify-between items-center bg-gray-50">
+                     <h3 className="font-bold text-gray-800">Load Backup</h3>
+                     <button onClick={() => setShowLoadModal(false)}><RotateCcw size={18} className="text-gray-400 hover:text-red-500"/></button>
+                 </div>
+                 <div className="max-h-96 overflow-y-auto p-2">
+                     {backups.length === 0 && <p className="p-4 text-center text-gray-400">No backups found.</p>}
+                     {backups.map(b => (
+                         <div key={b.id} className="flex items-center justify-between p-4 hover:bg-blue-50 rounded-xl cursor-pointer border-b border-gray-100 last:border-0" onClick={() => handleRestore(b.id)}>
+                             <div>
+                                 <p className="font-bold text-gray-800">{b.name}</p>
+                                 <p className="text-xs text-gray-500">{new Date(b.created_at).toLocaleString()}</p>
+                             </div>
+                             <button className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold">LOAD</button>
+                         </div>
+                     ))}
+                 </div>
+             </div>
+         </div>
       )}
     </div>
   );
